@@ -30,4 +30,9 @@ fan_control = "modes"
 # EC's own curve runs (fan stops at idle). Tested speeds: 30% ~2700 rpm,
 # 60% ~4900 rpm, 100% ~7250 rpm.
 fan_curve = [[50, 30], [60, 40], [70, 60], [80, 80], [88, 100]]
+# The fan_curve drives the CPU fan from the CPU temperature. The GPU fan follows
+# the GPU temperature (the CPU's while the GPU sleeps) on gpu_fan_curve, or on
+# fan_curve when this is empty.
+gpu_fan_curve = []
+battery_max_percent = 60  # fan cap on battery, except in an emergency
 ec_refresh = 30.0         # re-send the duty this often (the EC can't report it back)

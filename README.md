@@ -1,5 +1,7 @@
 # vivofan
 
+[![tests](https://github.com/Poopoomanu/vivofan/actions/workflows/tests.yml/badge.svg)](https://github.com/Poopoomanu/vivofan/actions/workflows/tests.yml)
+
 Fan control for the ASUS Vivobook Pro 15 (K6502VJ / Q530VJ, board K6502VJQ) on Linux.
 
 On Linux this laptop only offers three firmware fan modes, and the usual tools
@@ -7,8 +9,13 @@ On Linux this laptop only offers three firmware fan modes, and the usual tools
 
 - **Fan modes by temperature:** switches quiet / balanced / performance
   automatically, and keeps the CPU on an energy-saving preference so it runs cooler.
-- **A real fan curve** (optional): sets the fan speed directly, 30–100%, on both
-  the CPU and GPU fans, up to about 7250 rpm.
+- **A real fan curve** (optional): sets the fan speed directly, 30–100%, up to
+  about 7250 rpm. The CPU fan follows the CPU temperature and the GPU fan the
+  GPU's, with a gentler cap on battery.
+- **Tray icon** with temperatures, fan speeds and one-click overrides
+  (e.g. "Fans 100% for 10 min").
+- **Safe by design:** never below 30%, fans handed back to the laptop when
+  vivofan stops, crashes or hangs (systemd watchdog).
 
 > **Warning:** the direct fan curve is tested only on board `K6502VJQ`, and
 > vivofan refuses to use it on any other board. Writing to an embedded
@@ -38,6 +45,16 @@ cat /sys/firmware/acpi/platform_profile_choices
 You should see `quiet balanced performance`.
 
 ### 2. Download
+
+**Easiest:** download `vivofan_<version>_all.deb` from the
+[latest release](https://github.com/Poopoomanu/vivofan/releases/latest) and
+install it (it sets everything up, including the tray icon):
+
+```bash
+sudo apt install ./vivofan_*_all.deb
+```
+
+Then skip to step 5. **Or** use the latest code from git:
 
 ```bash
 sudo apt install -y git
@@ -106,9 +123,21 @@ The default curve:
 | 80 °C | 80% |
 | 88 °C and up | 100% (~7250 rpm) |
 
-You can change it with `fan_curve` in `/etc/vivofan.toml`. If the CPU gets too
+The CPU fan follows the CPU temperature and the GPU fan the GPU's (or the
+CPU's while the GPU sleeps). On battery the fans are capped at 60%
+(`battery_max_percent`). You can change the curves with `fan_curve` and
+`gpu_fan_curve` in `/etc/vivofan.toml`. If the CPU gets too
 hot or its temperature can't be read, the fans go to 100%. When vivofan stops,
 even after a crash, the fans go back to the laptop's own control.
+
+### Everyday use
+
+- **Tray icon:** shows temperatures, both fan speeds and the mode; its menu has
+  quick overrides. It starts at login (or run `vivofan-tray`).
+- **Force a speed for a while:** `sudo vivofan --set 100 --minutes 10`, and
+  `sudo vivofan --set auto` to go back. With fan modes instead of the curve:
+  `sudo vivofan --set performance`.
+- **See what it's doing:** `vivofan --status`.
 
 ### Undo
 
@@ -124,6 +153,22 @@ the `vivofan/vivofan` folder):
 ```bash
 sudo sh uninstall.sh
 ```
+
+If you installed the `.deb`: `sudo apt remove vivofan`.
+
+## Got a different ASUS laptop?
+
+The direct fan curve only runs on boards that have been checked. Help add
+yours: run the read-only probe and paste its output into a
+[new issue](https://github.com/Poopoomanu/vivofan/issues/new).
+
+```bash
+sudo python3 vivofan.py --probe
+```
+
+It only reads fan registers (its one write picks which fan to read), never
+changes fan control, and asks before it touches the hardware. The fan modes
+part of vivofan already works on most recent ASUS laptops.
 
 ## Other Linux tips for this laptop
 

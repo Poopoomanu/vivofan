@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests (fake /sys, fake EC: no hardware needed)
+        working-directory: vivofan
+        run: python -m unittest -v test_vivofan test_tray
+      - name: Shell scripts parse
+        run: |
+          sh -n vivofan/install.sh
+          sh -n vivofan/uninstall.sh
+          sh -n packaging/build-deb.sh
+      - name: Build the .deb
+        run: sh packaging/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vivofan-deb-py${{ matrix.python }}
+          path: dist/*.deb
