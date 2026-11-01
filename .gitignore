@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+
+# ASUS firmware dumps (ACPI tables): kept locally, not redistributed.
+# FINDINGS.md cites line numbers in dsl/DSDT-Notebook.dsl.
+acpi/
+dsl/

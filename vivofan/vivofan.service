@@ -1,0 +1,25 @@
+[Unit]
+Description=vivofan - temperature-driven fan modes for ASUS Vivobook
+After=systemd-modules-load.service
+Conflicts=power-profiles-daemon.service tuned-ppd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/vivofan --config /etc/vivofan.toml
+# Runs even if vivofan crashes or is killed: never leave the fans on a fixed duty.
+# Does nothing unless fan_control = "ec".
+ExecStopPost=/usr/bin/python3 /usr/local/bin/vivofan --config /etc/vivofan.toml --release
+Restart=on-failure
+RestartSec=5
+
+# Needs root to write /sys; everything else locked down.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+# vivofan configuration. Installed to /etc/vivofan.toml.
+# Temperatures are °C, times are seconds. Every key is optional.
+
+interval = 2.0            # how often to sample
+smoothing = 0.3           # 0..1, higher reacts faster to spikes
+
+quiet_below = 55.0        # quiet -> balanced once the smoothed temp reaches this
+performance_above = 65.0  # balanced -> performance once it reaches this
+hysteresis = 6.0          # must drop this far below a threshold to step back down
+emergency = 85.0          # raw temp that forces performance immediately
+
+min_dwell = 30.0          # hold a mode at least this long before stepping down
+battery_max_mode = "balanced"  # never go above this on battery (except emergency)
+manual_override = 600.0   # back off this long after you change the mode yourself (Fn key)
+use_gpu = true            # include the RTX 3050 temp (only read while the GPU is awake)
+exit_mode = "balanced"    # mode to leave behind when the service stops
+
+# CPU energy/performance preference set with each mode (replaces what
+# power-profiles-daemon did). Choices: performance, balance_performance,
+# balance_power, power. "" leaves it alone.
+epp_quiet = "balance_power"
+epp_balanced = "balance_power"
+epp_performance = "balance_power"
+
+# Direct fan control over the MyASUS EC channel (K6502VJQ only, see FINDINGS.md).
+# "modes" = switch the three firmware modes above; "ec" = drive fan duty from
+# fan_curve and leave the firmware modes alone. Emergency/unreadable temp = 100%.
+fan_control = "modes"
+# [smoothed °C, fan %], linear in between, 30..100 %. Below the first point the
+# EC's own curve runs (fan stops at idle). Tested speeds: 30% ~2700 rpm,
+# 60% ~4900 rpm, 100% ~7250 rpm.
+fan_curve = [[50, 30], [60, 40], [70, 60], [80, 80], [88, 100]]
+ec_refresh = 30.0         # re-send the duty this often (the EC can't report it back)
