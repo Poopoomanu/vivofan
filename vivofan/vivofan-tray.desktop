@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=vivofan tray
+Comment=Temperatures, fan speeds and quick fan overrides for vivofan
+Exec=vivofan-tray
+Icon=/usr/local/share/vivofan/vivofan.svg
+Terminal=false
+Categories=System;Monitor;
+X-GNOME-Autostart-enabled=true

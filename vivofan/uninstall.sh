@@ -9,6 +9,9 @@ fi
 
 systemctl disable --now vivofan.service 2>/dev/null || true
 rm -f /etc/systemd/system/vivofan.service /usr/local/bin/vivofan
+rm -f /usr/local/bin/vivofan-tray /etc/xdg/autostart/vivofan-tray.desktop
+rm -rf /usr/local/share/vivofan
+pkill -f vivofan-tray 2>/dev/null || true
 echo "kept /etc/vivofan.toml (delete it yourself if you don't want it)"
 systemctl daemon-reload
 
