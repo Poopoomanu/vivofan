@@ -12,6 +12,7 @@ No third-party dependencies.
 """
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -26,6 +27,8 @@ try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
     tomllib = None
+
+__version__ = "1.1.0"
 
 log = logging.getLogger("vivofan")
 
@@ -70,10 +73,17 @@ class Config:
     # [smoothed °C, fan %] points, linear in between. Below the first point the
     # EC's own curve runs (idle fan-stop); at/above the last, its percent.
     fan_curve: list = field(default_factory=lambda: [[50, 30], [60, 40], [70, 60], [80, 80], [88, 100]])
+    # GPU fan curve, driven by the GPU temperature (the CPU's while the GPU sleeps).
+    # Empty: same as fan_curve.
+    gpu_fan_curve: list = field(default_factory=list)
+    battery_max_percent: int = 60     # fan cap on battery, except emergency
     ec_refresh: float = 30.0          # re-send the duty this often (it can't be read back)
 
     def epp_for(self, mode):
         return getattr(self, f"epp_{mode}")
+
+    def curve_for(self, fan):
+        return self.gpu_fan_curve if fan == 1 and self.gpu_fan_curve else self.fan_curve
 
     def validate(self):
         for name in ("battery_max_mode", "exit_mode"):
@@ -87,15 +97,22 @@ class Config:
             raise ValueError("emergency must be above performance_above")
         if self.fan_control not in ("modes", "ec"):
             raise ValueError('fan_control must be "modes" or "ec"')
-        pts = self.fan_curve
-        if not pts or any(len(p) != 2 for p in pts):
-            raise ValueError("fan_curve must be a list of [temp, percent] pairs")
-        temps = [t for t, _ in pts]
-        pcts = [p for _, p in pts]
-        if temps != sorted(set(temps)):
-            raise ValueError("fan_curve temperatures must strictly increase")
-        if pcts != sorted(pcts) or pcts[0] < MIN_PERCENT or pcts[-1] > 100:
-            raise ValueError(f"fan_curve percents must rise and stay within {MIN_PERCENT}..100")
+        validate_curve("fan_curve", self.fan_curve)
+        if self.gpu_fan_curve:
+            validate_curve("gpu_fan_curve", self.gpu_fan_curve)
+        if not MIN_PERCENT <= self.battery_max_percent <= 100:
+            raise ValueError(f"battery_max_percent must be {MIN_PERCENT}..100")
+
+
+def validate_curve(name, pts):
+    if not pts or any(len(p) != 2 for p in pts):
+        raise ValueError(f"{name} must be a list of [temp, percent] pairs")
+    temps = [t for t, _ in pts]
+    pcts = [p for _, p in pts]
+    if temps != sorted(set(temps)):
+        raise ValueError(f"{name} temperatures must strictly increase")
+    if pcts != sorted(pcts) or pcts[0] < MIN_PERCENT or pcts[-1] > 100:
+        raise ValueError(f"{name} percents must rise and stay within {MIN_PERCENT}..100")
 
 
 def load_config(path):
@@ -363,6 +380,98 @@ class PortIO:
         time.sleep(0.02)
 
 
+class ProbeIO(PortIO):
+    """PortIO for --probe: the only write allowed is the fan select (0x32 = 0/1)."""
+
+    def status(self):
+        return self._in(self.CMD)
+
+    def write(self, reg, value):
+        if reg != 0x32 or value not in (0, 1):
+            raise ValueError(f"probe refuses to write {value} to {reg:#x}")
+        super().write(reg, value)
+
+
+def probe(root="/", assume_yes=False, samples=10, sleep=time.sleep, ask=input, io_factory=None):
+    """`vivofan --probe`: a read-only report on whether this laptop has the EC fan channel.
+
+    Prints Markdown to paste into a GitHub issue. Returns 0 if the channel answered.
+    """
+    def dmi(name):
+        return read_text(Path(root, "sys/class/dmi/id", name)) or "?"
+
+    def kernel_rpm():
+        for d in find_hwmon(root, {"asus"}):
+            raw = read_text(d / "fan1_input")
+            if raw and raw.isdigit():
+                return int(raw)
+        return None
+
+    vendor, board = dmi("sys_vendor"), dmi("board_name")
+    rows = [
+        ("vendor", vendor), ("product", dmi("product_name")), ("board", board),
+        ("BIOS", dmi("bios_version")), ("kernel", os.uname().release),
+        ("platform_profile", read_text(Path(root, "sys/firmware/acpi/platform_profile_choices")) or "missing"),
+        ("kernel CPU fan rpm", kernel_rpm()), ("vivofan", __version__),
+    ]
+    print("### vivofan probe\n\n| | |\n|---|---|")
+    for k, v in rows:
+        print(f"| {k} | {v} |")
+    print()
+
+    def done(result, rc):
+        print(f"**EC channel:** {result}\n")
+        print("Please paste everything above into a new issue: "
+              "https://github.com/Poopoomanu/vivofan/issues/new")
+        return rc
+
+    if "ASUS" not in vendor.upper():
+        return done("not checked (not an ASUS laptop)", 1)
+    if io_factory is None:
+        if os.geteuid() != 0:
+            return done("not checked (run as root: `sudo vivofan --probe`)", 1)
+        io_factory = ProbeIO
+    try:
+        io = io_factory()
+    except OSError as e:
+        return done(f"not checked ({e})", 1)
+    if io.status() == 0xFF:
+        return done("absent (status port 0x25D reads 0xFF)", 1)
+    if not assume_yes:
+        print("The EC check reads fan registers through ports 0x25C/0x25D (the MyASUS")
+        print("fan channel). Its only write selects which fan to read (register 0x32).")
+        print("It never changes fan control.")
+        if ask("Continue? [yes/no] ").strip().lower() not in ("y", "yes"):
+            return done("not checked (declined)", 1)
+        print()
+    fan = FanEc(io)
+    try:
+        count = io.read(0x30)
+        mode = io.read(0x31)
+        print(f"fan count (0x30): {count}, control mode (0x31): {mode}\n")
+        print("| kernel CPU fan | EC fan0 | EC fan1 |\n|---|---|---|")
+        rows, close = [], 0
+        for i in range(samples):
+            k = kernel_rpm()
+            f = [fan.rpm(n) for n in range(min(count, 2))] + [None] * (2 - min(count, 2))
+            rows.append((k, f))
+            if k is not None and f[0] is not None and abs(f[0] - k) <= 150:
+                close += 1
+            print(f"| {k} | {f[0]} | {f[1]} |")
+            if i + 1 < samples:
+                sleep(1)
+    except (EcTimeout, ValueError) as e:
+        return done(f"answered the status check, then failed: {e}", 1)
+    print()
+    if count not in (1, 2):
+        return done(f"answered, but fan count {count} is unexpected", 1)
+    moving = any(k for k, _ in rows)
+    verdict = f"fan0 matched the kernel's CPU fan in {close}/{samples} samples"
+    if not moving:
+        verdict += " (fan was stopped; run it again under light load for a stronger result)"
+    return done(f"present, {count} fan(s), mode {mode}; {verdict}", 0)
+
+
 class DryIO:
     """Stands in for PortIO in --dry-run: logs writes, remembers them for reads."""
 
@@ -382,7 +491,7 @@ class FanEc:
 
     def __init__(self, io):
         self.io = io
-        self.percent = None   # last duty sent, None while the EC curve runs
+        self.percent = None   # [cpu fan %, gpu fan %] last sent, None while the EC curve runs
         self.sent_at = float("-inf")
 
     def _select(self, fan):
@@ -397,14 +506,16 @@ class FanEc:
         return (self.io.read(0x34) << 8) | self.io.read(0x33)
 
     def set(self, percent, now):
-        percent = max(MIN_PERCENT, min(100, round(percent)))
-        duty = round(percent * 255 / 100)
+        """Set both fans: one percent for both, or [cpu fan %, gpu fan %]."""
+        if not isinstance(percent, (list, tuple)):
+            percent = [percent, percent]
+        percent = [max(MIN_PERCENT, min(100, round(p))) for p in percent]
         # Mode first, then duty: in auto the EC overwrites the duty register.
         self._select(0)
         self.io.write(0x31, 1)
         for fan in (0, 1):
             self._select(fan)
-            self.io.write(0x35, duty)
+            self.io.write(0x35, round(percent[fan] * 255 / 100))
         self.percent = percent
         self.sent_at = now
 
@@ -420,14 +531,13 @@ class FanEc:
         return False
 
 
-def curve_percent(temp, cfg, active):
-    """Fan % for a smoothed temp, or None to leave the EC's own curve running.
+def curve_percent(temp, pts, hysteresis, active):
+    """Fan % on curve `pts` for a smoothed temp, or None to leave the EC's own curve running.
 
     Once active, stays active until `hysteresis` below the first point, so it
     doesn't flap between the EC curve and our lowest duty.
     """
-    pts = cfg.fan_curve
-    start = pts[0][0] - (cfg.hysteresis if active else 0)
+    start = pts[0][0] - (hysteresis if active else 0)
     if temp < start:
         return None
     if temp >= pts[-1][0]:
@@ -459,6 +569,22 @@ def decide(temp, current, cfg):
     return MODES[idx]
 
 
+def sd_notify(message):
+    """Tell systemd READY=1 / WATCHDOG=1 (Type=notify, WatchdogSec). No-op outside systemd."""
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr.startswith("@"):
+        addr = "\0" + addr[1:]
+    import socket
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.connect(addr)
+            s.sendall(message.encode())
+    except OSError as e:
+        log.warning("sd_notify failed: %s", e)
+
+
 def clock():
     # CLOCK_BOOTTIME keeps counting through suspend, so we can spot resumes.
     if hasattr(time, "CLOCK_BOOTTIME"):
@@ -469,19 +595,25 @@ def clock():
 class Daemon:
     MAX_SENSOR_FAILURES = 3
 
-    def __init__(self, cfg, sensors, backend, epp=None, fan=None):
+    def __init__(self, cfg, sensors, backend, epp=None, fan=None, run_dir=None):
         self.cfg = cfg
         self.sensors = sensors
         self.backend = backend
         self.epp = epp
         self.fan = fan  # FanEc when fan_control = "ec"
+        self.run_dir = Path(run_dir) if run_dir else None  # status.json / override.json
+        self.wall = time.time  # wall clock for override expiry; tests replace it
         self.mode = backend.read() or "balanced"
         self.last_written = self.mode
         self.last_change = float("-inf")
         self.last_step = None
         self.override_until = float("-inf")
-        self.ema = None
+        self.ema = None       # max(cpu, gpu), drives the firmware modes
+        self.ema_cpu = None   # drives the CPU fan
+        self.ema_gpu = None   # drives the GPU fan; None while the GPU sleeps
+        self.cpu = self.gpu = None
         self.failures = 0
+        self.bad_override = None
 
     def apply(self, mode, now, reason):
         if mode != self.mode:
@@ -494,16 +626,40 @@ class Daemon:
         self.last_change = now
 
     def step(self, now):
+        try:
+            self._step(now)
+        finally:
+            self.write_status()
+
+    def override(self):
+        """The `vivofan --set` value if one is active and valid for this fan_control, else None."""
+        value = read_override(self.run_dir, self.wall())
+        if value is None:
+            self.bad_override = None
+            return None
+        if self.fan:
+            ok = value.isdigit() and MIN_PERCENT <= int(value) <= 100
+        else:
+            ok = value in MODES
+        if not ok:
+            if self.bad_override != value:
+                log.warning("ignoring override %r: not valid for fan_control = %r", value, self.cfg.fan_control)
+                self.bad_override = value
+            return None
+        return int(value) if self.fan else value
+
+    def _step(self, now):
         cfg = self.cfg
         resumed = self.last_step is not None and now - self.last_step > cfg.interval * 5
         self.last_step = now
 
         cpu = self.sensors.cpu_temp()
+        self.cpu = cpu
         if cpu is None:
             self.failures += 1
             if self.failures >= self.MAX_SENSOR_FAILURES:
                 if self.fan:
-                    if self.fan.percent != 100 or not self.fan.manual():
+                    if self.fan.percent != [100, 100] or not self.fan.manual():
                         log.info("CPU temperature unreadable, failing safe: fans 100%%")
                         self.fan.set(100, now)
                 elif self.mode != "performance":
@@ -511,11 +667,18 @@ class Daemon:
             return
         self.failures = 0
         gpu = self.sensors.gpu_temp()
+        self.gpu = gpu
         raw = max(t for t in (cpu, gpu) if t is not None)
-        self.ema = raw if self.ema is None or resumed else self.ema + cfg.smoothing * (raw - self.ema)
+
+        def smooth(old, new):
+            return new if old is None or resumed else old + cfg.smoothing * (new - old)
+        self.ema = smooth(self.ema, raw)
+        self.ema_cpu = smooth(self.ema_cpu, cpu)
+        self.ema_gpu = smooth(self.ema_gpu, gpu) if gpu is not None else None
+        override = self.override()
 
         if self.fan:
-            self.step_fan(now, cpu, gpu, raw)
+            self.step_fan(now, cpu, gpu, raw, override)
             return
 
         actual = self.backend.read()
@@ -542,6 +705,11 @@ class Daemon:
                 self.apply("performance", now, f"emergency {raw:.0f}°C")
             return
 
+        if override is not None:
+            if self.mode != override or actual != override:
+                self.apply(override, now, "manual override (vivofan --set)")
+            return
+
         if now < self.override_until:
             return
 
@@ -558,37 +726,130 @@ class Daemon:
         rpm_txt = f", fan {rpm} rpm" if rpm is not None else ""
         self.apply(target, now, f"cpu {cpu:.0f}°C{gpu_txt}, smoothed {self.ema:.1f}°C{rpm_txt}")
 
-    def step_fan(self, now, cpu, gpu, raw):
-        """fan_control = "ec": set fan duty from fan_curve; firmware modes are left alone."""
+    def fan_targets(self):
+        """[cpu fan %, gpu fan %] from the curves, or None to leave the EC curve running.
+
+        The CPU fan follows the CPU temperature, the GPU fan the GPU temperature
+        (the CPU's while the GPU sleeps). Manual mode is global on the EC, so if
+        either fan needs us, the other gets at least its curve's lowest point.
+        """
+        cfg = self.cfg
+        active = self.fan.percent is not None
+        temps = [self.ema_cpu, self.ema_gpu if self.ema_gpu is not None else self.ema_cpu]
+        want = [curve_percent(temps[i], cfg.curve_for(i), cfg.hysteresis, active) for i in (0, 1)]
+        if want == [None, None]:
+            return None
+        want = [w if w is not None else cfg.curve_for(i)[0][1] for i, w in enumerate(want)]
+        if not self.sensors.on_ac():
+            want = [min(w, cfg.battery_max_percent) for w in want]
+        return want
+
+    def step_fan(self, now, cpu, gpu, raw, override=None):
+        """fan_control = "ec": set fan duty from the curves; firmware modes are left alone."""
         cfg, fan = self.cfg, self.fan
         if raw >= cfg.emergency:
-            want, why = 100, f"emergency {raw:.0f}°C"
+            want, why = [100, 100], f"emergency {raw:.0f}°C"
+        elif override is not None:
+            want, why = [override, override], "manual override (vivofan --set)"
         else:
-            want = curve_percent(self.ema, cfg, fan.percent is not None)
-            gpu_txt = f", gpu {gpu:.0f}°C" if gpu is not None else ""
-            why = f"cpu {cpu:.0f}°C{gpu_txt}, smoothed {self.ema:.1f}°C"
-        log.debug("%s -> %s", why, "EC curve" if want is None else f"{want:.0f}%")
+            want = self.fan_targets()
+            gpu_txt = f", gpu {self.ema_gpu:.1f}°C" if self.ema_gpu is not None else ""
+            why = f"smoothed cpu {self.ema_cpu:.1f}°C{gpu_txt}"
+            if not self.sensors.on_ac():
+                why += ", on battery"
+        log.debug("%s -> %s", why, "EC curve" if want is None else "/".join(f"{w:.0f}%" for w in want))
 
         if want is None:
             if fan.percent is not None:
-                log.info("fans %d%% -> EC automatic (%s)", fan.percent, why)
+                log.info("fans %s -> EC automatic (%s)", fmt_percent(fan.percent), why)
                 if not fan.release():
                     log.warning("EC did not confirm the release; will retry")
-                    fan.percent = 0  # keep trying on the next step
+                    fan.percent = [0, 0]  # keep trying on the next step
             return
 
-        target = max(MIN_PERCENT, min(100, round(want)))
+        target = [max(MIN_PERCENT, min(100, round(w))) for w in want]
         manual = fan.manual()
         if fan.percent is not None and not manual:
             # Suspend or a firmware mode switch can drop manual mode.
-            log.info("EC left manual mode, re-applying %d%%", target)
-        changed = fan.percent is None or abs(target - fan.percent) >= 3 or (
-            target in (MIN_PERCENT, 100) and target != fan.percent)
+            log.info("EC left manual mode, re-applying %s", fmt_percent(target))
+        changed = fan.percent is None or any(
+            abs(t - p) >= 3 or (t in (MIN_PERCENT, 100) and t != p) for t, p in zip(target, fan.percent))
         if changed:
-            before = "EC automatic" if fan.percent is None else f"{fan.percent}%"
-            log.info("fans %s -> %d%% (%s)", before, target, why)
+            before = "EC automatic" if fan.percent is None else fmt_percent(fan.percent)
+            log.info("fans %s -> %s (%s)", before, fmt_percent(target), why)
         if changed or not manual or now - fan.sent_at >= cfg.ec_refresh:
             fan.set(target, now)
+
+    def write_status(self):
+        """Publish the current state to <run_dir>/status.json for --status and the tray."""
+        if not self.run_dir or not self.run_dir.is_dir():
+            return
+        fans = []
+        for i, name in enumerate(("cpu", "gpu")):
+            rpm = None
+            if self.fan:
+                try:
+                    rpm = self.fan.rpm(i)
+                except OSError:
+                    pass
+            elif i == 0:
+                rpm = self.sensors.fan_rpm()
+            percent = self.fan.percent[i] if self.fan and self.fan.percent else None
+            fans.append({"name": name, "rpm": rpm, "percent": percent})
+        state = {
+            "time": self.wall(),
+            "fan_control": self.cfg.fan_control,
+            "mode": self.mode,
+            "cpu": self.cpu, "gpu": self.gpu,
+            "smoothed": None if self.ema is None else round(self.ema, 1),
+            "on_ac": self.sensors.on_ac(),
+            "ec_auto": bool(self.fan) and self.fan.percent is None,
+            "fans": fans,
+            "override": read_override(self.run_dir, self.wall(), full=True),
+        }
+        tmp = self.run_dir / "status.json.tmp"
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, self.run_dir / "status.json")
+
+
+def fmt_percent(p):
+    return f"{p[0]}%" if p[0] == p[1] else f"cpu {p[0]}% / gpu {p[1]}%"
+
+
+def read_override(run_dir, wall, full=False):
+    """The active `vivofan --set` value (str), or None. Expired overrides are ignored."""
+    if not run_dir:
+        return None
+    try:
+        data = json.loads((Path(run_dir) / "override.json").read_text())
+        value, until = str(data["value"]), float(data["until"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if until <= wall:
+        return None
+    return {"value": value, "until": until} if full else value
+
+
+def set_override(run_dir, value, minutes, cfg, wall=time.time):
+    """`vivofan --set`: write or clear the override file the running daemon reads."""
+    run_dir = Path(run_dir)
+    if not run_dir.is_dir():
+        raise RuntimeError(f"{run_dir} not found: is the vivofan service running?")
+    path = run_dir / "override.json"
+    if value == "auto":
+        path.unlink(missing_ok=True)
+        print("back to automatic")
+        return
+    if cfg.fan_control == "ec":
+        if not value.isdigit() or not MIN_PERCENT <= int(value) <= 100:
+            raise ValueError(f"--set takes a fan % from {MIN_PERCENT} to 100, or auto")
+    elif value not in MODES:
+        raise ValueError(f"--set takes one of {', '.join(MODES)}, or auto")
+    if not 0 < minutes <= 24 * 60:
+        raise ValueError("--minutes must be 1..1440")
+    path.write_text(json.dumps({"value": value, "until": wall() + minutes * 60}))
+    shown = f"fans {value}%" if cfg.fan_control == "ec" else f"mode {value}"
+    print(f"{shown} for {minutes:g} min (vivofan --set auto to end it early)")
 
 
 def status(sensors, backend, epp):
@@ -604,6 +865,27 @@ def status(sensors, backend, epp):
     print(f"on AC     : {sensors.on_ac()}")
 
 
+def service_status(run_dir, wall=time.time):
+    """Print what the running service last published, if it is fresh."""
+    try:
+        st = json.loads((Path(run_dir) / "status.json").read_text())
+    except (OSError, ValueError):
+        print("service   : not running (no status)")
+        return
+    age = wall() - st.get("time", 0)
+    if age > 30:
+        print(f"service   : status is {age:.0f}s old, is vivofan stuck?")
+    fans = ", ".join(
+        f"{f['name']} fan {f['rpm'] if f['rpm'] is not None else '?'} rpm"
+        + (f" at {f['percent']}%" if f.get("percent") is not None else "")
+        for f in st.get("fans", []))
+    control = "EC curve (automatic)" if st.get("ec_auto") else st.get("fan_control")
+    print(f"service   : running, {control}, smoothed {st.get('smoothed')}°C, {fans}")
+    ov = st.get("override")
+    if ov:
+        print(f"override  : {ov['value']} for {max(0, ov['until'] - wall()) / 60:.0f} more min")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--config", default="/etc/vivofan.toml")
@@ -611,16 +893,30 @@ def main(argv=None):
     p.add_argument("--status", action="store_true", help="print sensors and interface, then exit")
     p.add_argument("--release", action="store_true",
                    help='hand the fans back to the EC curve (fan_control = "ec"), then exit')
+    p.add_argument("--set", metavar="VALUE",
+                   help="override the running service: a fan %% (ec) or a mode (modes), or auto")
+    p.add_argument("--minutes", type=float, default=30, help="how long --set lasts (default 30)")
+    p.add_argument("--probe", action="store_true",
+                   help="read-only check for the EC fan channel, to report other laptops")
+    p.add_argument("--yes", action="store_true", help="don't ask before the --probe EC check")
+    p.add_argument("--version", action="version", version=f"vivofan {__version__}")
     p.add_argument("--verbose", "-v", action="store_true")
     p.add_argument("--root", default="/", help=argparse.SUPPRESS)  # fake sysfs root for tests
     args = p.parse_args(argv)
+    run_dir = Path(args.root, "run/vivofan")
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(message)s")
+    if args.probe:
+        return probe(args.root, args.yes)
     try:
         cfg = load_config(args.config)
+        if args.set:
+            set_override(run_dir, args.set.strip().lower(), args.minutes, cfg)
+            return 0
         fan = None
-        if cfg.fan_control == "ec":
+        # Without root, --status shows the service's published status instead of the EC.
+        if cfg.fan_control == "ec" and not (args.status and os.geteuid() != 0):
             board = board_name(args.root)
             if board not in EC_BOARDS:
                 raise RuntimeError(f'fan_control = "ec" is only tested on {sorted(EC_BOARDS)}, '
@@ -643,9 +939,10 @@ def main(argv=None):
         if fan:
             print(f"ec fans   : {'manual' if fan.manual() else 'EC automatic'}, "
                   f"cpu fan {fan.rpm(0)} rpm, gpu fan {fan.rpm(1)} rpm")
+        service_status(run_dir)
         return 0
 
-    daemon = Daemon(cfg, sensors, backend, epp, fan)
+    daemon = Daemon(cfg, sensors, backend, epp, fan, None if args.dry_run else run_dir)
     epp.write(daemon.mode)
     running = True
 
@@ -657,12 +954,16 @@ def main(argv=None):
     signal.signal(signal.SIGINT, stop)
     log.info("started: %s via %s, current mode %s", "dry-run" if args.dry_run else "live",
              "EC fan curve" if fan else backend.path, daemon.mode)
+    sd_notify("READY=1")
 
     while running:
         try:
             daemon.step(clock())
         except OSError as e:
             log.warning("step failed: %s", e)
+        # Only reached if step() returned: a hang here stops the pings, and
+        # systemd kills and restarts us (ExecStopPost releases the fans).
+        sd_notify("WATCHDOG=1")
         time.sleep(cfg.interval)
 
     if fan:

@@ -4,8 +4,14 @@ After=systemd-modules-load.service
 Conflicts=power-profiles-daemon.service tuned-ppd.service
 
 [Service]
-Type=simple
+Type=notify
 ExecStart=/usr/bin/python3 /usr/local/bin/vivofan --config /etc/vivofan.toml
+# vivofan pings every few seconds; if it hangs for 30 s systemd kills it,
+# ExecStopPost releases the fans and Restart= starts it again.
+WatchdogSec=30
+# Status for `vivofan --status` and the tray, and the --set override file.
+RuntimeDirectory=vivofan
+RuntimeDirectoryMode=0755
 # Runs even if vivofan crashes or is killed: never leave the fans on a fixed duty.
 # Does nothing unless fan_control = "ec".
 ExecStopPost=/usr/bin/python3 /usr/local/bin/vivofan --config /etc/vivofan.toml --release

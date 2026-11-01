@@ -1,11 +1,16 @@
 """Tests for vivofan against a fake sysfs tree. Run: python -m unittest test_vivofan"""
 
+import json
+import os
+import socket
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 import vivofan
-from vivofan import Backend, Config, Daemon, Epp, FanEc, Sensors, curve_percent, decide
+from vivofan import (Backend, Config, Daemon, Epp, FanEc, ProbeIO, Sensors, curve_percent, decide,
+                     probe, read_override, sd_notify, set_override)
 
 
 class FakeSys:
@@ -373,7 +378,7 @@ class CurveTests(unittest.TestCase):
         ]
         for temp, active, want in cases:
             with self.subTest(temp=temp, active=active):
-                self.assertEqual(curve_percent(temp, self.cfg, active), want)
+                self.assertEqual(curve_percent(temp, self.cfg.fan_curve, self.cfg.hysteresis, active), want)
 
     def test_validate_rejects_bad_curves(self):
         for curve in ([], [[50, 30], [50, 40]], [[50, 40], [60, 30]], [[50, 10]], [[50, 30], [60, 120]]):
@@ -394,7 +399,7 @@ class FanEcTests(unittest.TestCase):
         ec = FakeEc()
         fan = FanEc(ec)
         fan.set(10, 0)
-        self.assertEqual((fan.percent, ec.duty), (30, [76, 76]))
+        self.assertEqual((fan.percent, ec.duty), ([30, 30], [76, 76]))
 
     def test_release(self):
         ec = FakeEc()
@@ -501,6 +506,209 @@ class EcMainTests(unittest.TestCase):
         self.fs.write("sys/class/dmi/id/board_name", "N6506MU")
         self.assertEqual(self.run_main('fan_control = "ec"\n', "--release"), 1)
         self.assertEqual(self.ec.writes, [])
+
+
+class WatchdogTests(unittest.TestCase):
+    def test_sd_notify_sends_to_notify_socket(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "notify")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as srv:
+                srv.bind(path)
+                old = os.environ.get("NOTIFY_SOCKET")
+                os.environ["NOTIFY_SOCKET"] = path
+                try:
+                    sd_notify("WATCHDOG=1")
+                finally:
+                    if old is None:
+                        del os.environ["NOTIFY_SOCKET"]
+                    else:
+                        os.environ["NOTIFY_SOCKET"] = old
+                self.assertEqual(srv.recv(64), b"WATCHDOG=1")
+
+    def test_sd_notify_outside_systemd_is_a_no_op(self):
+        old = os.environ.pop("NOTIFY_SOCKET", None)
+        try:
+            sd_notify("READY=1")
+        finally:
+            if old is not None:
+                os.environ["NOTIFY_SOCKET"] = old
+
+
+class SplitCurveTests(unittest.TestCase):
+    def setUp(self):
+        self.fs = FakeSys()
+        self.ec = FakeEc()
+
+    def tearDown(self):
+        self.fs.cleanup()
+
+    def daemon(self, gpu=None, **overrides):
+        if gpu is not None:
+            self.fs.write("sys/class/hwmon/hwmon6/name", "nouveau")
+            self.fs.write("sys/class/hwmon/hwmon6/temp1_input", str(gpu * 1000))
+        return make_daemon(self.fs, fan=FanEc(self.ec), fan_control="ec", **overrides)
+
+    def test_gpu_fan_follows_gpu_temp(self):
+        d = self.daemon(gpu=70)
+        self.fs.cpu(45)  # CPU cool: its fan sits at the curve's lowest point
+        d.step(0)
+        self.assertEqual(d.fan.percent, [30, 60])
+
+    def test_gpu_fan_follows_cpu_while_gpu_sleeps(self):
+        d = self.daemon()
+        self.fs.cpu(70)
+        d.step(0)
+        self.assertEqual(d.fan.percent, [60, 60])
+
+    def test_own_gpu_curve(self):
+        d = self.daemon(gpu=60, gpu_fan_curve=[[40, 50], [60, 90]])
+        self.fs.cpu(65)
+        d.step(0)
+        self.assertEqual(d.fan.percent, [50, 90])
+
+    def test_battery_caps_fans(self):
+        self.fs.write("sys/class/power_supply/AC0/online", "0")
+        d = self.daemon()
+        self.fs.cpu(84)
+        d.step(0)
+        self.assertEqual(d.fan.percent, [60, 60])
+
+    def test_emergency_ignores_battery_cap(self):
+        self.fs.write("sys/class/power_supply/AC0/online", "0")
+        d = self.daemon()
+        self.fs.cpu(95)
+        d.step(0)
+        self.assertEqual(d.fan.percent, [100, 100])
+
+    def test_validates_gpu_curve_and_battery_cap(self):
+        with self.assertRaises(ValueError):
+            Config(gpu_fan_curve=[[50, 10]]).validate()
+        with self.assertRaises(ValueError):
+            Config(battery_max_percent=20).validate()
+
+
+class OverrideTests(unittest.TestCase):
+    def setUp(self):
+        self.fs = FakeSys()
+        self.run = self.fs.root / "run/vivofan"
+        self.run.mkdir(parents=True)
+        self.now = 1000.0
+
+    def tearDown(self):
+        self.fs.cleanup()
+
+    def wall(self):
+        return self.now
+
+    def daemon(self, **overrides):
+        d = make_daemon(self.fs, **overrides)
+        d.run_dir = self.run
+        d.wall = self.wall
+        return d
+
+    def test_set_and_clear(self):
+        cfg = Config(fan_control="ec")
+        set_override(self.run, "80", 10, cfg, wall=self.wall)
+        self.assertEqual(read_override(self.run, self.now), "80")
+        self.assertIsNone(read_override(self.run, self.now + 601))  # expired
+        set_override(self.run, "auto", 10, cfg, wall=self.wall)
+        self.assertIsNone(read_override(self.run, self.now))
+
+    def test_set_validates(self):
+        for value, cfg in (("20", Config(fan_control="ec")), ("turbo", Config(fan_control="ec")),
+                           ("80", Config()), ("loud", Config())):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                set_override(self.run, value, 10, cfg, wall=self.wall)
+
+    def test_set_needs_running_service(self):
+        with self.assertRaises(RuntimeError):
+            set_override(self.fs.root / "nope", "80", 10, Config(fan_control="ec"))
+
+    def test_ec_override_wins_over_curve(self):
+        ec = FakeEc()
+        d = self.daemon(fan=FanEc(ec), fan_control="ec")
+        set_override(self.run, "90", 10, d.cfg, wall=self.wall)
+        self.fs.cpu(40)  # curve would leave the EC in charge
+        d.step(0)
+        self.assertEqual((ec.mode, ec.duty), (1, [230, 230]))
+        self.now += 601  # expired
+        d.step(2)
+        self.assertEqual(ec.mode, 0)
+
+    def test_mode_override(self):
+        d = self.daemon()
+        set_override(self.run, "performance", 10, d.cfg, wall=self.wall)
+        self.fs.cpu(40)
+        d.step(0)
+        self.assertEqual(self.fs.profile(), "performance")
+
+    def test_invalid_override_is_ignored(self):
+        d = self.daemon()
+        (self.run / "override.json").write_text(json.dumps({"value": "80", "until": self.now + 60}))
+        self.fs.cpu(40)
+        with self.assertLogs("vivofan", level="WARNING"):
+            d.step(0)
+        self.assertEqual(self.fs.profile(), "quiet")
+
+    def test_status_file(self):
+        ec = FakeEc()
+        d = self.daemon(fan=FanEc(ec), fan_control="ec")
+        self.fs.cpu(65)
+        d.step(0)
+        st = json.loads((self.run / "status.json").read_text())
+        self.assertEqual(st["cpu"], 65)
+        self.assertFalse(st["ec_auto"])
+        self.assertEqual([f["percent"] for f in st["fans"]], [50, 50])
+        self.assertEqual([f["rpm"] for f in st["fans"]], [2500, 2400])
+
+    def test_status_command_reads_service_status(self):
+        d = self.daemon()
+        d.wall = time.time  # service_status checks freshness against real time
+        self.fs.cpu(50)
+        d.step(0)
+        rc = vivofan.main(["--root", str(self.fs.root), "--config", "nonexistent", "--status"])
+        self.assertEqual(rc, 0)
+
+
+class ProbeTests(unittest.TestCase):
+    def setUp(self):
+        self.fs = FakeSys()
+        self.fs.write("sys/class/dmi/id/sys_vendor", "ASUSTeK COMPUTER INC.")
+        self.ec = FakeEc()
+        self.ec.status = lambda: 0x00
+
+    def tearDown(self):
+        self.fs.cleanup()
+
+    def run_probe(self, **kw):
+        kw.setdefault("io_factory", lambda: self.ec)
+        kw.setdefault("assume_yes", True)
+        return probe(self.fs.root, samples=3, sleep=lambda s: None, **kw)
+
+    def test_present(self):
+        self.assertEqual(self.run_probe(), 0)
+        self.assertTrue(all(reg == 0x32 for reg, _ in self.ec.writes))
+
+    def test_not_asus(self):
+        self.fs.write("sys/class/dmi/id/sys_vendor", "LENOVO")
+        opened = []
+        self.assertEqual(self.run_probe(io_factory=lambda: opened.append(1)), 1)
+        self.assertEqual(opened, [])
+
+    def test_no_channel(self):
+        self.ec.status = lambda: 0xFF
+        self.assertEqual(self.run_probe(), 1)
+        self.assertEqual(self.ec.writes, [])
+
+    def test_declined(self):
+        self.assertEqual(self.run_probe(assume_yes=False, ask=lambda q: "no"), 1)
+        self.assertEqual(self.ec.writes, [])
+
+    def test_probe_io_refuses_control_writes(self):
+        io = ProbeIO.__new__(ProbeIO)  # no /dev/port needed: the guard runs first
+        for reg, value in ((0x31, 1), (0x35, 255), (0x32, 2)):
+            with self.subTest(reg=reg), self.assertRaises(ValueError):
+                io.write(reg, value)
 
 
 if __name__ == "__main__":
