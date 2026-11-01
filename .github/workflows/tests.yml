@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Unit tests (fake /sys, fake EC: no hardware needed)
+      - name: "Unit tests (fake /sys and fake EC, no hardware needed)"
         working-directory: vivofan
         run: python -m unittest -v test_vivofan test_tray
       - name: Shell scripts parse
