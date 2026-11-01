@@ -48,6 +48,14 @@ channel MyASUS uses (see `../FINDINGS.md`, Path 3). Off by default.
 
 Try it first: `sudo python3 vivofan.py --dry-run -v --config <a toml with fan_control = "ec">`.
 
+## Fan curve editor
+
+`vivofan-settings` (in the applications menu as "vivofan settings") edits the
+CPU and GPU curves with the mouse, offers presets and sets the battery cap.
+Apply writes a new config and runs `pkexec vivofan --install-config FILE`,
+which validates the whole file and only then replaces `/etc/vivofan.toml` and
+restarts the service. The editor itself never lets a curve drop below 30% or fall.
+
 ## Overrides, status and the tray
 
 ```bash

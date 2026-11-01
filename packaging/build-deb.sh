@@ -10,12 +10,16 @@ trap 'rm -rf "$pkg"' EXIT
 
 install -D -m 0755 "$src/vivofan.py" "$pkg/usr/bin/vivofan"
 install -D -m 0755 "$src/vivofan-tray.py" "$pkg/usr/bin/vivofan-tray"
+install -D -m 0755 "$src/vivofan-settings.py" "$pkg/usr/bin/vivofan-settings"
 install -D -m 0644 "$src/vivofan.svg" "$pkg/usr/share/vivofan/vivofan.svg"
 install -D -m 0644 "$src/vivofan.toml" "$pkg/etc/vivofan.toml"
-mkdir -p "$pkg/usr/lib/systemd/system" "$pkg/etc/xdg/autostart" "$pkg/usr/share/doc/vivofan" "$pkg/DEBIAN"
+mkdir -p "$pkg/usr/lib/systemd/system" "$pkg/etc/xdg/autostart" "$pkg/usr/share/doc/vivofan" \
+    "$pkg/usr/share/applications" "$pkg/DEBIAN"
+sed 's#/usr/local/share/#/usr/share/#g' "$src/vivofan-settings.desktop" > "$pkg/usr/share/applications/vivofan-settings.desktop"
 sed 's#/usr/local/bin/#/usr/bin/#g' "$src/vivofan.service" > "$pkg/usr/lib/systemd/system/vivofan.service"
 sed 's#/usr/local/share/#/usr/share/#g' "$src/vivofan-tray.desktop" > "$pkg/etc/xdg/autostart/vivofan-tray.desktop"
-chmod 0644 "$pkg/usr/lib/systemd/system/vivofan.service" "$pkg/etc/xdg/autostart/vivofan-tray.desktop"
+chmod 0644 "$pkg/usr/lib/systemd/system/vivofan.service" "$pkg/etc/xdg/autostart/vivofan-tray.desktop" \
+    "$pkg/usr/share/applications/vivofan-settings.desktop"
 install -m 0644 "$here/README.md" "$here/FINDINGS.md" "$pkg/usr/share/doc/vivofan/"
 cat > "$pkg/usr/share/doc/vivofan/copyright" <<'EOF'
 vivofan - https://github.com/Poopoomanu/vivofan
@@ -36,7 +40,8 @@ Homepage: https://github.com/Poopoomanu/vivofan
 Description: fan control for the ASUS Vivobook Pro 15 (K6502VJ / Q530VJ)
  Switches the firmware fan modes by temperature and, optionally, drives both
  fans directly with a real fan curve over the MyASUS EC channel. Includes a
- tray icon. Direct fan control only runs on board K6502VJQ.
+ tray icon and a fan curve editor. Direct fan control only runs on board
+ K6502VJQ.
 EOF
 
 printf '/etc/vivofan.toml\n/etc/xdg/autostart/vivofan-tray.desktop\n' > "$pkg/DEBIAN/conffiles"

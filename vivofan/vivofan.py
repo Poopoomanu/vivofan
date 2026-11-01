@@ -28,7 +28,7 @@ try:
 except ModuleNotFoundError:  # Python < 3.11
     tomllib = None
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 log = logging.getLogger("vivofan")
 
@@ -830,6 +830,28 @@ def read_override(run_dir, wall, full=False):
     return {"value": value, "until": until} if full else value
 
 
+def install_config(src, root="/", restart=True):
+    """`vivofan --install-config FILE` (used by vivofan-settings via pkexec).
+
+    Validates FILE completely, then atomically replaces /etc/vivofan.toml and
+    restarts the service. Nothing is touched if validation fails.
+    """
+    src = Path(src)
+    if not src.is_file():
+        raise RuntimeError(f"{src} not found")
+    cfg = load_config(src)  # raises ValueError on a bad file or bad values
+    if cfg.fan_control == "ec" and board_name(root) not in EC_BOARDS:
+        raise RuntimeError(f'fan_control = "ec" is only tested on {sorted(EC_BOARDS)}')
+    dest = Path(root, "etc/vivofan.toml")
+    tmp = dest.with_name("vivofan.toml.new")
+    tmp.write_bytes(src.read_bytes())
+    tmp.chmod(0o644)
+    os.replace(tmp, dest)
+    if restart:
+        subprocess.run(["systemctl", "restart", "vivofan.service"], check=False)
+    print(f"installed {dest}" + ("; vivofan restarted" if restart else ""))
+
+
 def set_override(run_dir, value, minutes, cfg, wall=time.time):
     """`vivofan --set`: write or clear the override file the running daemon reads."""
     run_dir = Path(run_dir)
@@ -896,6 +918,8 @@ def main(argv=None):
     p.add_argument("--set", metavar="VALUE",
                    help="override the running service: a fan %% (ec) or a mode (modes), or auto")
     p.add_argument("--minutes", type=float, default=30, help="how long --set lasts (default 30)")
+    p.add_argument("--install-config", metavar="FILE",
+                   help="validate FILE, install it as /etc/vivofan.toml and restart the service")
     p.add_argument("--probe", action="store_true",
                    help="read-only check for the EC fan channel, to report other laptops")
     p.add_argument("--yes", action="store_true", help="don't ask before the --probe EC check")
@@ -909,6 +933,13 @@ def main(argv=None):
                         format="%(levelname)s %(message)s")
     if args.probe:
         return probe(args.root, args.yes)
+    if args.install_config:
+        try:
+            install_config(args.install_config, args.root, restart=args.root == "/")
+        except (RuntimeError, ValueError, OSError) as e:
+            log.error("not installed: %s", e)
+            return 1
+        return 0
     try:
         cfg = load_config(args.config)
         if args.set:

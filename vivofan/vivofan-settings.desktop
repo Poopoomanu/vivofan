@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=vivofan settings
+Comment=Fan curves for the ASUS Vivobook Pro 15
+Exec=vivofan-settings
+Icon=/usr/local/share/vivofan/vivofan.svg
+Terminal=false
+Categories=Settings;HardwareSettings;System;
+Keywords=fan;curve;cooling;temperature;

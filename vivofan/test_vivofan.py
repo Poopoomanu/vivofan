@@ -711,5 +711,39 @@ class ProbeTests(unittest.TestCase):
                 io.write(reg, value)
 
 
+class InstallConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.fs = FakeSys()
+        (self.fs.root / "etc").mkdir()
+        self.dest = self.fs.root / "etc/vivofan.toml"
+        self.dest.write_text("# old\n")
+        self.new = self.fs.root / "new.toml"
+
+    def tearDown(self):
+        self.fs.cleanup()
+
+    def run_install(self, text):
+        self.new.write_text(text)
+        return vivofan.main(["--root", str(self.fs.root), "--install-config", str(self.new)])
+
+    def test_installs_valid_config(self):
+        text = 'fan_control = "ec"\nfan_curve = [[45, 35], [80, 100]]\n'
+        self.assertEqual(self.run_install(text), 0)
+        self.assertEqual(self.dest.read_text(), text)
+        self.assertEqual(self.dest.stat().st_mode & 0o777, 0o644)
+
+    def test_rejects_bad_values_and_leaves_old_file(self):
+        for text in ('fan_curve = [[50, 10]]\n', 'fan_curve = [[60, 30], [50, 40]]\n',
+                     'battery_max_percent = 5\n', 'fan_control = "turbo"\n', 'not toml [[[\n'):
+            with self.subTest(text=text):
+                self.assertEqual(self.run_install(text), 1)
+                self.assertEqual(self.dest.read_text(), "# old\n")
+
+    def test_rejects_ec_on_other_boards(self):
+        self.fs.write("sys/class/dmi/id/board_name", "N6506MU")
+        self.assertEqual(self.run_install('fan_control = "ec"\n'), 1)
+        self.assertEqual(self.dest.read_text(), "# old\n")
+
+
 if __name__ == "__main__":
     unittest.main()

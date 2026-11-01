@@ -24,6 +24,10 @@ install -m 0644 vivofan.service /etc/systemd/system/vivofan.service
 install -m 0755 vivofan-tray.py /usr/local/bin/vivofan-tray
 install -D -m 0644 vivofan.svg /usr/local/share/vivofan/vivofan.svg
 install -D -m 0644 vivofan-tray.desktop /etc/xdg/autostart/vivofan-tray.desktop
+
+# Fan curve editor, in the applications menu.
+install -m 0755 vivofan-settings.py /usr/local/bin/vivofan-settings
+install -D -m 0644 vivofan-settings.desktop /usr/local/share/applications/vivofan-settings.desktop
 if ! python3 -c 'import gi; gi.require_version("AyatanaAppIndicator3", "0.1")' 2>/dev/null; then
     echo "note: the tray icon needs: sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1"
 fi
@@ -45,3 +49,4 @@ systemctl restart vivofan.service  # picks up a new vivofan.py on reinstall
 systemctl --no-pager status vivofan.service
 echo "logs: journalctl -u vivofan -f"
 echo "tray icon: starts at your next login (or run vivofan-tray now)"
+echo "fan curves: open \"vivofan settings\" from the menu (or run vivofan-settings)"

@@ -12,6 +12,8 @@ On Linux this laptop only offers three firmware fan modes, and the usual tools
 - **A real fan curve** (optional): sets the fan speed directly, 30–100%, up to
   about 7250 rpm. The CPU fan follows the CPU temperature and the GPU fan the
   GPU's, with a gentler cap on battery.
+- **Fan curve editor:** drag the curve for each fan, or pick a preset
+  (Silent / Balanced / Cool / Max), then Apply.
 - **Tray icon** with temperatures, fan speeds and one-click overrides
   (e.g. "Fans 100% for 10 min").
 - **Safe by design:** never below 30%, fans handed back to the laptop when
@@ -99,7 +101,14 @@ journalctl -u vivofan -f
 
 ### 5. Optional: turn on the real fan curve
 
-Open the settings file:
+**Easiest:** open **vivofan settings** from the applications menu (or the tray
+icon → *Fan curve settings…*), choose **Custom fan curve**, drag the dots or
+pick a preset, and click **Apply**. It asks for your password, checks the
+settings and restarts vivofan.
+
+![vivofan settings](docs/settings.png)
+
+**Or by hand:** open the settings file:
 
 ```bash
 sudo nano /etc/vivofan.toml

@@ -145,6 +145,11 @@ def main():
         if term:
             subprocess.Popen([term, "-e", "journalctl -u vivofan -f"])
 
+    def open_settings(_item):
+        cmd = shutil.which("vivofan-settings")
+        if cmd:
+            subprocess.Popen([cmd])
+
     def rebuild_actions(fan_control):
         for item in action_items:
             menu.remove(item)
@@ -155,6 +160,9 @@ def main():
             item.connect("activate", run_set, args)
             entries.append(item)
         entries.append(Gtk.SeparatorMenuItem())
+        settings_item = Gtk.MenuItem(label="Fan curve settings…")
+        settings_item.connect("activate", open_settings)
+        entries.append(settings_item)
         log_item = Gtk.MenuItem(label="Show log")
         log_item.connect("activate", show_log)
         quit_item = Gtk.MenuItem(label="Hide icon")

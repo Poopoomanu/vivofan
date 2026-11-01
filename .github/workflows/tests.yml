@@ -17,7 +17,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: "Unit tests (fake /sys and fake EC, no hardware needed)"
         working-directory: vivofan
-        run: python -m unittest -v test_vivofan test_tray
+        run: python -m unittest -v test_vivofan test_tray test_settings
       - name: Shell scripts parse
         run: |
           sh -n vivofan/install.sh
