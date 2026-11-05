@@ -78,6 +78,10 @@ class Config:
     gpu_fan_curve: list = field(default_factory=list)
     battery_max_percent: int = 60     # fan cap on battery, except emergency
     ec_refresh: float = 30.0          # re-send the duty this often (it can't be read back)
+    # The tray beeps and notifies while the raw CPU temp is at/above alarm_temp,
+    # every alarm_repeat seconds, until it cools 5 °C below. 0 turns it off.
+    alarm_temp: float = 80.0
+    alarm_repeat: float = 20.0
 
     def epp_for(self, mode):
         return getattr(self, f"epp_{mode}")
@@ -102,6 +106,10 @@ class Config:
             validate_curve("gpu_fan_curve", self.gpu_fan_curve)
         if not MIN_PERCENT <= self.battery_max_percent <= 100:
             raise ValueError(f"battery_max_percent must be {MIN_PERCENT}..100")
+        if self.alarm_temp and not 50 <= self.alarm_temp <= 100:
+            raise ValueError("alarm_temp must be 0 (off) or 50..100")
+        if self.alarm_repeat < 5:
+            raise ValueError("alarm_repeat must be at least 5 seconds")
 
 
 def validate_curve(name, pts):

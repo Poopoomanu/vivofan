@@ -72,5 +72,36 @@ class LoadTests(unittest.TestCase):
             self.assertEqual(tray.sysfs_fallback(root), {"cpu": 58.0, "rpm": 2400, "mode": "balanced"})
 
 
+class OverheatTests(unittest.TestCase):
+    def test_beeps_at_limit_then_repeats(self):
+        alarm = tray.Overheat(80, 20)
+        self.assertTrue(alarm.check(81, 100))    # first beep
+        self.assertFalse(alarm.check(82, 110))   # too soon
+        self.assertTrue(alarm.check(82, 120))    # repeat after 20 s
+
+    def test_quiet_below_limit(self):
+        alarm = tray.Overheat(80, 20)
+        self.assertFalse(alarm.check(79.9, 100))
+
+    def test_keeps_beeping_until_5_degrees_under(self):
+        alarm = tray.Overheat(80, 20)
+        self.assertTrue(alarm.check(85, 100))
+        self.assertTrue(alarm.check(77, 120))    # still above 75: keep going
+        self.assertFalse(alarm.check(75, 140))   # cleared
+        self.assertFalse(alarm.check(78, 141))   # below the limit and cleared: stays quiet
+        self.assertTrue(alarm.check(80, 200))    # new episode beeps at once
+
+    def test_off_when_limit_zero_or_unknown_temp(self):
+        self.assertFalse(tray.Overheat(0, 20).check(95, 100))
+        self.assertFalse(tray.Overheat(80, 20).check(None, 100))
+
+    def test_load_alarm_settings(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "vivofan.toml"
+            p.write_text("alarm_temp = 75.0\nalarm_repeat = 10.0\n")
+            self.assertEqual(tray.load_alarm_settings(p), (75.0, 10.0))
+            self.assertEqual(tray.load_alarm_settings(Path(d) / "missing.toml"), (80.0, 20.0))
+
+
 if __name__ == "__main__":
     unittest.main()

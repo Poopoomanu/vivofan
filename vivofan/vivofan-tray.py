@@ -12,12 +12,15 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 STATUS = Path("/run/vivofan/status.json")
+CONFIG = Path("/etc/vivofan.toml")
 ICON_DIRS = [Path(__file__).resolve().parent, Path("/usr/local/share/vivofan"), Path("/usr/share/vivofan")]
 REFRESH_S = 2
 STALE_S = 30
+ALARM_CLEAR_BELOW = 5  # the overheat alarm stops this many °C under alarm_temp
 
 
 def read_text(path):
@@ -57,6 +60,55 @@ def load_status(path=STATUS, now=None):
 
 def deg(t):
     return "?" if t is None else f"{t:.0f} °C"
+
+
+def load_alarm_settings(path=CONFIG):
+    """(alarm_temp, alarm_repeat) from vivofan.toml; 0 temp means the alarm is off."""
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, ValueError):
+        data = {}
+    return float(data.get("alarm_temp", 80.0)), float(data.get("alarm_repeat", 20.0))
+
+
+class Overheat:
+    """Decides when the overheat alarm should sound: while the CPU is at/above
+    `limit`, every `repeat` seconds, until it is ALARM_CLEAR_BELOW under the limit."""
+
+    def __init__(self, limit, repeat):
+        self.limit, self.repeat = limit, repeat
+        self.active, self.last = False, None
+
+    def check(self, temp, now):
+        """True when the alarm should beep and notify now."""
+        if not self.limit or temp is None:
+            self.active, self.last = False, None
+            return False
+        if temp >= self.limit:
+            self.active = True
+        elif temp <= self.limit - ALARM_CLEAR_BELOW:
+            self.active, self.last = False, None
+            return False
+        if not self.active:
+            return False
+        if self.last is None or now - self.last >= self.repeat:
+            self.last = now
+            return True
+        return False
+
+
+def sound_alarm(temp):
+    """Beep (sound theme if available, else the GTK bell) and show a critical notification."""
+    if shutil.which("canberra-gtk-play"):
+        subprocess.Popen(["canberra-gtk-play", "-i", "dialog-warning"])
+    else:
+        from gi.repository import Gdk
+        Gdk.beep()
+    if shutil.which("notify-send"):
+        subprocess.Popen(["notify-send", "-u", "critical", "-i", "dialog-warning",
+                          "vivofan: CPU overheating",
+                          f"CPU is at {temp:.0f} °C. Check the fans and the vents."])
 
 
 def summarize(st, fallback, now=None):
@@ -173,8 +225,15 @@ def main():
             item.show()
             action_items.append(item)
 
+    alarm_temp, alarm_repeat = load_alarm_settings()
+    overheat = Overheat(alarm_temp, alarm_repeat)
+
     def refresh():
-        s = summarize(load_status(), sysfs_fallback())
+        st = load_status()
+        s = summarize(st, sysfs_fallback())
+        temp = st.get("cpu") if st else sysfs_fallback()["cpu"]
+        if overheat.check(temp, time.time()):
+            sound_alarm(temp)
         while len(info_items) < len(s["lines"]):
             item = Gtk.MenuItem(label="")
             item.set_sensitive(False)
