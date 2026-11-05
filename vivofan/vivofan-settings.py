@@ -21,6 +21,8 @@ STATUS = Path("/run/vivofan/status.json")
 EC_BOARDS = {"K6502VJQ"}
 MIN_PERCENT = 30
 T_MIN, T_MAX = 30, 100  # editable temperature range, °C
+EMERGENCY_MIN = 66       # must sit above performance_above (65 by default)
+REFRESH_MIN, REFRESH_MAX = 5, 300  # seconds
 
 PRESETS = {
     "Silent": [[55, 30], [65, 35], [75, 50], [85, 75], [92, 100]],
@@ -82,6 +84,8 @@ def load_settings(path):
         "fan_curve": data.get("fan_curve", PRESETS["Balanced"]),
         "gpu_fan_curve": data.get("gpu_fan_curve", []),
         "battery_max_percent": int(data.get("battery_max_percent", 60)),
+        "emergency": float(data.get("emergency", 85.0)),
+        "ec_refresh": float(data.get("ec_refresh", 30.0)),
     }
 
 
@@ -121,6 +125,8 @@ def main():
         "curves": [saved["fan_curve"], saved["gpu_fan_curve"] or [list(p) for p in saved["fan_curve"]]],
         "gpu_same": not saved["gpu_fan_curve"],
         "battery": saved["battery_max_percent"],
+        "emergency": saved["emergency"],
+        "ec_refresh": saved["ec_refresh"],
         "fan": 0, "drag": None, "temps": current_temps(),
     }
 
@@ -176,6 +182,25 @@ def main():
     bat_box.pack_start(bat, True, True, 0)
     box.pack_start(bat_box, False, False, 0)
 
+    # Other fan settings: when everything goes to 100%, and how often the duty is re-sent.
+    fan_settings = Gtk.Frame(label="Fan settings")
+    grid = Gtk.Grid(column_spacing=12, row_spacing=6, margin=8)
+    fan_settings.add(grid)
+    emergency_spin = Gtk.SpinButton.new_with_range(EMERGENCY_MIN, T_MAX, 1)
+    emergency_spin.set_value(s["emergency"])
+    emergency_spin.set_tooltip_text("At or above this temperature the fans go to 100% (and the CPU to performance).")
+    refresh_spin = Gtk.SpinButton.new_with_range(REFRESH_MIN, REFRESH_MAX, 1)
+    refresh_spin.set_value(s["ec_refresh"])
+    refresh_spin.set_tooltip_text("How often vivofan re-sends the fan speed to the laptop, in seconds. "
+                                  "The laptop can't report it back, so this keeps it from drifting.")
+    for row, (text, spin, unit) in enumerate([
+            ("Emergency temperature", emergency_spin, "°C"),
+            ("Re-send fan speed every", refresh_spin, "seconds")]):
+        grid.attach(Gtk.Label(label=text, xalign=0), 0, row, 1, 1)
+        grid.attach(spin, 1, row, 1, 1)
+        grid.attach(Gtk.Label(label=unit, xalign=0), 2, row, 1, 1)
+    box.pack_start(fan_settings, False, False, 0)
+
     buttons = Gtk.Box(spacing=8)
     reset = Gtk.Button(label="Reset")
     apply = Gtk.Button(label="Apply")
@@ -203,8 +228,8 @@ def main():
         curve = s["curves"][editing()]
         which = "CPU and GPU fans" if s["gpu_same"] else ("CPU fan" if s["fan"] == 0 else "GPU fan")
         text = (f"Editing the {which}. Drag the dots. Below {curve[0][0]} °C the laptop's own curve "
-                f"runs (the fan can stop at idle). Never below {MIN_PERCENT}%; 85 °C or an unreadable "
-                f"sensor always means 100%.")
+                f"runs (the fan can stop at idle). Never below {MIN_PERCENT}%; {emergency_spin.get_value():.0f} °C "
+                f"or an unreadable sensor always means 100%.")
         if not rb_ec.get_active():
             text = "Firmware modes are selected: the curve below is saved but not used. " + text
         hint.set_text(text)
@@ -315,6 +340,8 @@ def main():
         rb_ec.set_active(fresh["fan_control"] == "ec")
         rb_modes.set_active(fresh["fan_control"] != "ec")
         bat.set_value(fresh["battery_max_percent"])
+        emergency_spin.set_value(fresh["emergency"])
+        refresh_spin.set_value(fresh["ec_refresh"])
         area.queue_draw()
         update_hint()
 
@@ -335,6 +362,8 @@ def main():
             "fan_curve": s["curves"][0],
             "gpu_fan_curve": [] if s["gpu_same"] else s["curves"][1],
             "battery_max_percent": int(bat.get_value()),
+            "emergency": emergency_spin.get_value(),
+            "ec_refresh": refresh_spin.get_value(),
         }
         with tempfile.NamedTemporaryFile("w", suffix=".toml", prefix="vivofan-", delete=False) as f:
             f.write(update_config_text(base_text, values))
@@ -364,6 +393,7 @@ def main():
     reset.connect("clicked", on_reset)
     apply.connect("clicked", on_apply)
     GLib.timeout_add_seconds(2, tick)
+    emergency_spin.connect("value-changed", lambda _s: update_hint())
     update_hint()
     win.show_all()
     Gtk.main()

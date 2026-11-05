@@ -86,6 +86,18 @@ class ConfigTextTests(unittest.TestCase):
         got = settings.load_settings("/nonexistent/vivofan.toml")
         self.assertEqual(got["fan_control"], "modes")
         self.assertEqual(got["fan_curve"], settings.PRESETS["Balanced"])
+        self.assertEqual((got["emergency"], got["ec_refresh"]), (85.0, 30.0))
+
+    def test_fan_settings_round_trip(self):
+        out = settings.update_config_text(Path(__file__).with_name("vivofan.toml").read_text(), {
+            "emergency": 80.0, "ec_refresh": 15.0})
+        with tempfile.NamedTemporaryFile("w", suffix=".toml") as f:
+            f.write(out)
+            f.flush()
+            cfg = vivofan.load_config(f.name)
+            got = settings.load_settings(f.name)
+        self.assertEqual((cfg.emergency, cfg.ec_refresh), (80.0, 15.0))
+        self.assertEqual((got["emergency"], got["ec_refresh"]), (80.0, 15.0))
 
 
 if __name__ == "__main__":
